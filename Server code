@@ -1,0 +1,48 @@
+#Server.py for the main server
+
+
+from flask import Flask, request, send_file
+import torch
+from model import QuantumTrainGenerator, TargetCNN
+
+app = Flask(__name__)
+PORT = 5000
+
+global_model = QuantumTrainGenerator(TargetCNN())
+updates = []
+
+@app.route("/get_model", methods=["GET"])
+def get_model():
+    torch.save(global_model.state_dict(), "global.pt")
+    return send_file("global.pt", as_attachment=True)
+
+@app.route("/send_update", methods=["POST"])
+def receive_update():
+    update = torch.load(request.files["update"])
+    updates.append(update)
+    print(f"Received update ({len(updates)})")
+    return "OK"
+
+@app.route("/aggregate", methods=["POST"])
+def aggregate():
+    if not updates:
+        return "No updates"
+
+    with torch.no_grad():
+        for k in global_model.state_dict():
+            global_model.state_dict()[k] += torch.stack(
+                [u[k] for u in updates]
+            ).mean(dim=0)
+
+    updates.clear()
+    print("Aggregation done")
+    return "Aggregated"
+
+if __name__ == "__main__":
+    print("Server running")
+    app.run(host="0.0.0.0", port=PORT)
+
+
+
+
+
