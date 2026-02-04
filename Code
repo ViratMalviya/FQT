@@ -1,0 +1,220 @@
+#Model.py for all the pcs
+import torch
+import torch.nn as nn
+import pennylane as qml
+import librosa
+import numpy as np
+
+torch.manual_seed(42)
+np.random.seed(42)
+
+# =====================
+# MFCC EXTRACTION
+# =====================
+def extract_mfcc(audio_path, n_mfcc=20, max_len=100):
+    y, sr = librosa.load(audio_path, sr=22050, mono=True)
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=n_mfcc)
+
+    if mfcc.shape[1] > max_len:
+        mfcc = mfcc[:, :max_len]
+    else:
+        mfcc = np.pad(mfcc, ((0,0),(0, max_len-mfcc.shape[1])))
+
+    mfcc = (mfcc - mfcc.mean()) / (mfcc.std() + 1e-6)
+    return mfcc.astype(np.float32)
+
+# =====================
+# QUANTUM SETUP
+# =====================
+n_qubits = 17
+n_layers = 2
+dev = qml.device("default.qubit", wires=n_qubits)
+
+@qml.qnode(dev, interface="torch")
+def qnn_circuit(inputs, weights):
+    qml.AngleEmbedding(inputs, wires=range(n_qubits))
+    qml.BasicEntanglerLayers(weights, wires=range(n_qubits))
+    return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
+
+def mfcc_to_quantum_input(mfcc):
+    mean = mfcc.mean(dim=1)
+    std = mfcc.std(dim=1)
+    stats = torch.cat([mean, std])
+
+    if stats.shape[0] > n_qubits:
+        stats = stats[:n_qubits]
+    else:
+        stats = torch.nn.functional.pad(stats, (0, n_qubits - stats.shape[0]))
+
+    return stats
+
+# =====================
+# CNN MODEL
+# =====================
+class TargetCNN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv2d(1, 8, 3, padding=1)
+        self.conv2 = nn.Conv2d(8, 16, 3, padding=1)
+        self.pool = nn.MaxPool2d(2)
+        self.fc1 = nn.Linear(16*5*25, 64)
+        self.fc2 = nn.Linear(64, 2)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        x = x.unsqueeze(1)
+        x = self.pool(self.relu(self.conv1(x)))
+        x = self.pool(self.relu(self.conv2(x)))
+        x = x.view(x.size(0), -1)
+        x = self.relu(self.fc1(x))
+        return self.fc2(x)
+
+# =====================
+# QUANTUM GENERATOR
+# =====================
+class QuantumTrainGenerator(nn.Module):
+    def __init__(self, target_model):
+        super().__init__()
+        self.num_params = sum(p.numel() for p in target_model.parameters())
+        self.qnn_weights = nn.Parameter(torch.randn(n_layers, n_qubits) * 0.01)
+        self.mapper = nn.Sequential(
+            nn.Linear(n_qubits, 128),
+            nn.ReLU(),
+            nn.Linear(128, self.num_params)
+        )
+
+    def forward(self, mfcc_batch):
+        mfcc_avg = mfcc_batch.mean(dim=0)
+        q_input = mfcc_to_quantum_input(mfcc_avg)
+        q_out = qnn_circuit(q_input, self.qnn_weights)
+        q_out = torch.tensor(q_out, dtype=torch.float32)
+        return self.mapper(q_out)
+
+def set_target_model_params(model, flat_params):
+    offset = 0
+    for p in model.parameters():
+        n = p.numel()
+        p.data.copy_(flat_params[offset:offset+n].view(p.size()))
+        offset += n
+
+
+-----------------------------------------------------------------------------------------------
+
+#Server.py for the main server
+from flask import Flask, request, send_file
+import torch
+from model import QuantumTrainGenerator, TargetCNN
+
+app = Flask(__name__)
+PORT = 5000
+
+global_model = QuantumTrainGenerator(TargetCNN())
+updates = []
+
+@app.route("/get_model", methods=["GET"])
+def get_model():
+    torch.save(global_model.state_dict(), "global.pt")
+    return send_file("global.pt", as_attachment=True)
+
+@app.route("/send_update", methods=["POST"])
+def receive_update():
+    update = torch.load(request.files["update"])
+    updates.append(update)
+    print(f"Received update ({len(updates)})")
+    return "OK"
+
+@app.route("/aggregate", methods=["POST"])
+def aggregate():
+    if not updates:
+        return "No updates"
+
+    with torch.no_grad():
+        for k in global_model.state_dict():
+            global_model.state_dict()[k] += torch.stack(
+                [u[k] for u in updates]
+            ).mean(dim=0)
+
+    updates.clear()
+    print("Aggregation done")
+    return "Aggregated"
+
+if __name__ == "__main__":
+    print("Server running")
+    app.run(host="0.0.0.0", port=PORT)
+
+
+
+-----------------------------------------------------------------------------------------------
+
+
+#client.py for all the 3 client pcs
+
+import os
+import torch
+import requests
+from torch.utils.data import DataLoader, TensorDataset
+import torch.nn as nn
+from model import *
+
+SERVER_URL = "http://192.168.1.10:5000"   # CHANGE THIS
+
+def load_local_data():
+    X, y = [], []
+    for label, folder in [(0,"REAL"), (1,"FAKE")]:
+        path = os.path.join("data", folder)
+        for f in os.listdir(path):
+            mfcc = extract_mfcc(os.path.join(path, f))
+            X.append(mfcc)
+            y.append(label)
+    return torch.tensor(X), torch.tensor(y)
+
+# Get global model
+r = requests.get(f"{SERVER_URL}/get_model")
+open("global.pt","wb").write(r.content)
+
+gen = QuantumTrainGenerator(TargetCNN())
+gen.load_state_dict(torch.load("global.pt"))
+
+cnn = TargetCNN()
+opt = torch.optim.Adam(gen.parameters(), lr=0.01)
+loss_fn = nn.CrossEntropyLoss()
+
+X, y = load_local_data()
+loader = DataLoader(TensorDataset(X,y), batch_size=4, shuffle=True)
+
+base = {k:v.clone() for k,v in gen.state_dict().items()}
+
+for data, labels in loader:
+    opt.zero_grad()
+    params = gen(data)
+    set_target_model_params(cnn, params)
+    out = cnn(data)
+    loss = loss_fn(out, labels)
+    loss.backward()
+    opt.step()
+
+update = {k: gen.state_dict()[k] - base[k] for k in base}
+
+torch.save(update, "update.pt")
+requests.post(f"{SERVER_URL}/send_update", files={"update": open("update.pt","rb")})
+print("Client update sent")
+
+
+
+-----------------------------------------------------------------------------------------------
+
+
+#to check everything
+
+
+import requests
+
+SERVER_URL = "http://192.168.1.10:5000"
+r = requests.get(f"{SERVER_URL}/get_model")
+
+if r.status_code == 200:
+    print("Server reachable")
+else:
+    print("Server error")
+
+
