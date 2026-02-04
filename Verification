@@ -1,0 +1,12 @@
+#to check everything
+
+
+import requests
+
+SERVER_URL = "http://192.168.1.10:5000"
+r = requests.get(f"{SERVER_URL}/get_model")
+
+if r.status_code == 200:
+    print("Server reachable")
+else:
+    print("Server error")
