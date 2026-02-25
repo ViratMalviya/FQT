@@ -17,35 +17,45 @@ def extract_mfcc(audio_path, n_mfcc=20, max_len=100):
     if mfcc.shape[1] > max_len:
         mfcc = mfcc[:, :max_len]
     else:
-        mfcc = np.pad(mfcc, ((0,0),(0, max_len-mfcc.shape[1])))
+        mfcc = np.pad(mfcc, ((0, 0), (0, max_len - mfcc.shape[1])))
 
     mfcc = (mfcc - mfcc.mean()) / (mfcc.std() + 1e-6)
     return mfcc.astype(np.float32)
+
 
 # =====================
 # QUANTUM SETUP
 # =====================
 n_qubits = 17
 n_layers = 2
+
 dev = qml.device("default.qubit", wires=n_qubits)
 
-@qml.qnode(dev, interface="torch")
+
+@qml.qnode(dev, interface="torch", diff_method="backprop")
 def qnn_circuit(inputs, weights):
     qml.AngleEmbedding(inputs, wires=range(n_qubits))
     qml.BasicEntanglerLayers(weights, wires=range(n_qubits))
     return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
 
+
 def mfcc_to_quantum_input(mfcc):
+    # mfcc shape: [n_mfcc, time]
+
     mean = mfcc.mean(dim=1)
     std = mfcc.std(dim=1)
+
     stats = torch.cat([mean, std])
 
     if stats.shape[0] > n_qubits:
         stats = stats[:n_qubits]
     else:
-        stats = torch.nn.functional.pad(stats, (0, n_qubits - stats.shape[0]))
+        stats = torch.nn.functional.pad(
+            stats, (0, n_qubits - stats.shape[0])
+        )
 
     return stats
+
 
 # =====================
 # CNN MODEL
@@ -53,20 +63,31 @@ def mfcc_to_quantum_input(mfcc):
 class TargetCNN(nn.Module):
     def __init__(self):
         super().__init__()
+
         self.conv1 = nn.Conv2d(1, 8, 3, padding=1)
         self.conv2 = nn.Conv2d(8, 16, 3, padding=1)
         self.pool = nn.MaxPool2d(2)
-        self.fc1 = nn.Linear(16*5*25, 64)
-        self.fc2 = nn.Linear(64, 2)
+
         self.relu = nn.ReLU()
 
+        # MFCC = 20x100
+        # After 2 pool layers:
+        # 20 -> 10 -> 5
+        # 100 -> 50 -> 25
+        self.fc1 = nn.Linear(16 * 5 * 25, 64)
+        self.fc2 = nn.Linear(64, 2)
+
     def forward(self, x):
-        x = x.unsqueeze(1)
+        x = x.unsqueeze(1)  # add channel
+
         x = self.pool(self.relu(self.conv1(x)))
         x = self.pool(self.relu(self.conv2(x)))
+
         x = x.view(x.size(0), -1)
+
         x = self.relu(self.fc1(x))
         return self.fc2(x)
+
 
 # =====================
 # QUANTUM GENERATOR
@@ -74,8 +95,15 @@ class TargetCNN(nn.Module):
 class QuantumTrainGenerator(nn.Module):
     def __init__(self, target_model):
         super().__init__()
-        self.num_params = sum(p.numel() for p in target_model.parameters())
-        self.qnn_weights = nn.Parameter(torch.randn(n_layers, n_qubits) * 0.01)
+
+        self.num_params = sum(
+            p.numel() for p in target_model.parameters()
+        )
+
+        self.qnn_weights = nn.Parameter(
+            torch.randn(n_layers, n_qubits) * 0.01
+        )
+
         self.mapper = nn.Sequential(
             nn.Linear(n_qubits, 128),
             nn.ReLU(),
@@ -83,8 +111,38 @@ class QuantumTrainGenerator(nn.Module):
         )
 
     def forward(self, mfcc_batch):
+        # mfcc_batch shape: [batch, 20, 100]
+
+        # Average batch
         mfcc_avg = mfcc_batch.mean(dim=0)
-        q_input = mfcc_to_quantum_input(mfcc_avg).to(self.qnn_weights.device)
-        q_out = qnn_circuit(q_input, self.qnn_weights)
+
+        # Convert MFCC -> quantum input
+        q_input = mfcc_to_quantum_input(mfcc_avg)
+
+        # PennyLane requires float64
+        q_input = q_input.double()
+
+        # Ensure weights are also double
+        q_weights = self.qnn_weights.double()
+
+        # Run quantum circuit
+        q_out = qnn_circuit(q_input, q_weights)
+
+        # Convert list -> tensor
         q_out = torch.stack(q_out)
+
+        # Back to float32 for PyTorch layers
+        q_out = q_out.float()
+
         return self.mapper(q_out)
+
+
+# =====================
+# PARAM ASSIGNER
+# =====================
+def set_target_model_params(model, flat_params):
+    offset = 0
+    for p in model.parameters():
+        n = p.numel()
+        p.data.copy_(flat_params[offset:offset + n].view(p.size()))
+        offset += n
