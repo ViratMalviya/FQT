@@ -1,4 +1,3 @@
-#Model.py for all the pcs
 import torch
 import torch.nn as nn
 import pennylane as qml
@@ -85,18 +84,7 @@ class QuantumTrainGenerator(nn.Module):
 
     def forward(self, mfcc_batch):
         mfcc_avg = mfcc_batch.mean(dim=0)
-        q_input = mfcc_to_quantum_input(mfcc_avg)
+        q_input = mfcc_to_quantum_input(mfcc_avg).to(self.qnn_weights.device)
         q_out = qnn_circuit(q_input, self.qnn_weights)
-        q_out = torch.tensor(q_out, dtype=torch.float32)
+        q_out = torch.stack(q_out)
         return self.mapper(q_out)
-
-def set_target_model_params(model, flat_params):
-    offset = 0
-    for p in model.parameters():
-        n = p.numel()
-        p.data.copy_(flat_params[offset:offset+n].view(p.size()))
-        offset += n
-
-
-
-
