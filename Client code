@@ -1,56 +1,81 @@
+# =========================
+# CLIENT.PY
+# =========================
 
-#client.py for all the 3 client pcs
-
-import os
-import torch
 import requests
-from torch.utils.data import DataLoader, TensorDataset
-import torch.nn as nn
-from model import *
+import torch
+from model import QuantumTrainGenerator, TargetCNN
+from data_utils import load_local_dataset
 
-SERVER_URL = "http://192.168.1.10:5000"   # CHANGE THIS
+SERVER_IP = "10.127.10.226"  # Change to server IP
+SERVER_PORT = 5000
+SERVER_URL = f"http://{SERVER_IP}:{SERVER_PORT}"
 
-def load_local_data():
-    X, y = [], []
-    for label, folder in [(0,"REAL"), (1,"FAKE")]:
-        path = os.path.join("data", folder)
-        for f in os.listdir(path):
-            mfcc = extract_mfcc(os.path.join(path, f))
-            X.append(mfcc)
-            y.append(label)
-    return torch.tensor(X), torch.tensor(y)
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Get global model
+print("Client starting...")
+
+# Load dataset
+train_loader = load_local_dataset("dataset")
+
+# Initialize model
+generator = QuantumTrainGenerator(TargetCNN()).to(DEVICE)
+
+# ---------------------------
+# STEP 1: Download Global Model
+# ---------------------------
+print("Downloading global model...")
 r = requests.get(f"{SERVER_URL}/get_model")
-open("global.pt","wb").write(r.content)
+with open("global.pt", "wb") as f:
+    f.write(r.content)
 
-gen = QuantumTrainGenerator(TargetCNN())
-gen.load_state_dict(torch.load("global.pt"))
+generator.load_state_dict(torch.load("global.pt"))
+print("Global model loaded.")
 
-cnn = TargetCNN()
-opt = torch.optim.Adam(gen.parameters(), lr=0.01)
-loss_fn = nn.CrossEntropyLoss()
+# ---------------------------
+# STEP 2: Local Training
+# ---------------------------
+optimizer = torch.optim.Adam(generator.parameters(), lr=0.01)
+criterion = torch.nn.CrossEntropyLoss()
 
-X, y = load_local_data()
-loader = DataLoader(TensorDataset(X,y), batch_size=4, shuffle=True)
+generator.train()
 
-base = {k:v.clone() for k,v in gen.state_dict().items()}
+for epoch in range(1):
+    print(f"Epoch {epoch+1}")
+    for batch_idx, (data, labels) in enumerate(train_loader):
+        data = data.to(DEVICE)
+        labels = labels.to(DEVICE)
 
-for data, labels in loader:
-    opt.zero_grad()
-    params = gen(data)
-    set_target_model_params(cnn, params)
-    out = cnn(data)
-    loss = loss_fn(out, labels)
-    loss.backward()
-    opt.step()
+        optimizer.zero_grad()
 
-update = {k: gen.state_dict()[k] - base[k] for k in base}
+        generated_params = generator(data)
+        cnn = TargetCNN().to(DEVICE)
 
-torch.save(update, "update.pt")
-requests.post(f"{SERVER_URL}/send_update", files={"update": open("update.pt","rb")})
-print("Client update sent")
+        # Set CNN parameters
+        offset = 0
+        for p in cnn.parameters():
+            n = p.numel()
+            p.data.copy_(generated_params[offset:offset+n].view(p.size()))
+            offset += n
 
+        outputs = cnn(data)
+        loss = criterion(outputs, labels)
 
+        loss.backward()
+        optimizer.step()
 
+        print(f"Batch {batch_idx+1}/{len(train_loader)} | Loss: {loss.item():.4f}")
 
+print("Local training complete.")
+
+# ---------------------------
+# STEP 3: Send Update to Server
+# ---------------------------
+print("Sending update to server...")
+
+torch.save(generator.state_dict(), "update.pt")
+
+with open("update.pt", "rb") as f:
+    requests.post(f"{SERVER_URL}/send_update", files={"update": f})
+
+print("Update sent.\n")
