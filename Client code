@@ -1,7 +1,8 @@
 # =========================
 # CLIENT.PY
 # =========================
-
+import model
+print("MODEL FILE LOADED FROM:", model.__file__)
 import requests
 import torch
 from model import QuantumTrainGenerator, TargetCNN
