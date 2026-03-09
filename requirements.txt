@@ -1,0 +1,8 @@
+torch
+torchvision
+torchaudio
+pennylane
+librosa
+numpy
+scikit-learn
+flwr
