@@ -1,0 +1,38 @@
+# =============================================================================
+# config.yaml — FQT (Federated Quantum-Train) Framework Configuration
+# =============================================================================
+# All hyperparameters and constants are centralized here.
+# Import in Python using: import yaml; cfg = yaml.safe_load(open("config.yaml"))
+# =============================================================================
+
+federated:
+  num_clients: 3          # Number of simulated edge clients
+  num_rounds: 5           # Number of federated aggregation rounds
+  fraction_fit: 1.0       # Fraction of clients sampled per round (1.0 = all)
+  fraction_evaluate: 1.0  # Fraction of clients used for evaluation per round
+
+model:
+  n_qubits: 17            # Number of qubits in the VQC (must match MFCC stat dim)
+  n_layers: 2             # Number of BasicEntangler layers in the quantum circuit
+  n_mfcc: 20              # Number of MFCC coefficients extracted per audio file
+  max_len: 100            # Maximum time-frame length for MFCC (pad/truncate to this)
+
+training:
+  learning_rate: 0.01     # SGD learning rate for local client training
+  batch_size: 32          # Mini-batch size for DataLoader
+  local_epochs: 3         # Number of local training epochs per federated round
+  seed: 42                # Global random seed for reproducibility
+
+data:
+  dataset_path: "dataset/"   # Local path to ASVspoof / audio dataset
+  sample_rate: 22050         # Audio sample rate (Hz) for librosa.load()
+  real_label: 0              # Integer label for genuine (bonafide) audio
+  fake_label: 1              # Integer label for spoofed (deepfake) audio
+
+server:
+  host: "0.0.0.0"           # Server bind address (use 0.0.0.0 for LAN access)
+  port: 5000                 # Flask server port
+
+output:
+  model_path: "deepfake_detector_model.pth"  # Path to save the final global model
+  assets_dir: "assets/"                       # Directory for saved visualizations

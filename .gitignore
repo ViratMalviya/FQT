@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+ENV/
+
+# Jupyter / Colab
+.ipynb_checkpoints/
+*.ipynb
+
+# Model weights & checkpoints (large binary files — do NOT commit)
+*.pt
+*.pth
+global.pt
+deepfake_detector_model.pth
+
+# Raw audio / dataset files (download separately — see data/README.md)
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+dataset/
+
+# Google Drive mount artifacts
+/content/
+
+# Environment variables
+.env
+*.env
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
